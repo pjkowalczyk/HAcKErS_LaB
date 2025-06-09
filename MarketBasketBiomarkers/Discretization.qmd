@@ -1,0 +1,215 @@
+---
+title: "Discretization"
+author:
+  - name: Paul J Kowalczyk
+    affiliations:
+      - name: HAcKErS LaB
+format:
+  html:
+    toc: true
+    embed-resources: true
+    theme: sandstone
+    code-fold: true
+    code-summary: "Code"
+title-block-banner: true
+date: "`r Sys.Date()`"
+date-format: short
+---
+
+### Introduction
+
+Frequent itemset mining requires ***discrete*** data.
+
+-   Boolean data ✓
+
+-   Ordinal data (few values ➝ one-hot-encoding) ✓
+
+-   Numeric data - discretize data using, *e.g.*, **R::santoku**
+
+### Data
+
+Data is taken from "**Classification models for clear cell renal carcinoma stage progression, based on tumor RNAseq expression trained supervised machine learning algorithms**" Z. Jagga & D. Gupta, *BMC Proc.* 2014 Oct 13; 8 (Suppl 6):s2 doi:10.1186/1753-6561-8-s6-s2.
+
+For this demonstration we consider the RPKM (**R**eads **P**er **K**ilobase per **M**illion) for the ZFP36 gene:
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+# Prepare computational ecosystem
+
+library(dplyr)
+library(magrittr)
+library(santoku)
+library(arules)
+library(arulesViz)
+library(tidyverse)
+library(rCBA)
+library(rJava)
+library(RColorBrewer)
+library(DT)
+library(gt)
+library(ggplot2)
+library(ggthemes)
+library(santoku)
+
+set.seed(42)
+
+# Load data
+
+df <- read.csv('Data4SantokuDemo.csv') %>% dplyr::select(-X) %>% rename(RPKM = 'ZFP36.7538')
+```
+
+#### Summary:
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+summary(df)
+
+table(df$Clinical_Status)
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+df %>%
+  ggplot(aes(x = RPKM, fill = '#0072B2')) +
+  geom_histogram(binwidth = 10) +
+  theme_tufte() +
+  scale_fill_manual(values = c('#0072B2')) +
+  guides(fill="none") +
+  ggtitle('ZFP36 RPKM (Reads Per Kilobase per Million)')
+```
+
+### Discretization
+
+[**Santoku**](https://hughjonesd.github.io/santoku/articles/santoku.html) is a package for cutting data into intervals. It provides chop(), a replacement for base R’s cut() function, as well as several convenience functions to cut different kinds of intervals.
+
+::: panel-tabset
+## Quantiles
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+tab_quantiles(df$RPKM, c(0.25, 0.5, 0.75))
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+Q <- quantile(df$RPKM)
+Q
+
+df %>%
+  ggplot(aes(x = RPKM, fill = '#0072B2')) +
+  geom_histogram(binwidth = 10) +
+  theme_tufte() +
+  scale_fill_manual(values = c('#0072B2')) +
+  guides(fill="none") +
+  ggtitle('ZFP36 RPKM (Reads Per Kilobase per Million)', subtitle = 'Thirds') +
+  geom_vline(xintercept = Q[2], color = '#D55E00') +
+  geom_vline(xintercept = Q[3], color = '#D55E00') +
+  geom_vline(xintercept = Q[4], color = '#D55E00')
+```
+
+## Thirds
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+tab_quantiles(df$RPKM, c(0.33, 0.67))
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+top <- df %>% dplyr::top_n(157, RPKM)
+topThird <- min(top$RPKM)
+bottom <- df %>% dplyr::top_n(-157, RPKM)
+bottomThird <- max(bottom$RPKM)
+
+paste0('Thirds: Lower = ', bottomThird, ' / Upper = ', topThird)
+
+df %>%
+  ggplot(aes(x = RPKM, fill = '#0072B2')) +
+  geom_histogram(binwidth = 10) +
+  theme_tufte() +
+  scale_fill_manual(values = c('#0072B2')) +
+  guides(fill="none") +
+  ggtitle('ZFP36 RPKM (Reads Per Kilobase per Million)', subtitle = 'Thirds') +
+  geom_vline(xintercept = bottomThird, color = '#D55E00') +
+  geom_vline(xintercept = topThird, color = '#D55E00')
+```
+
+## Standard Deviation
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+tab_mean_sd(df$RPKM)
+tab_mean_sd(df$RPKM, sds = 1)
+```
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+avg <- mean(df$RPKM)
+stdev <- sd(df$RPKM)
+
+df %>%
+  ggplot(aes(x = RPKM, fill = '#0072B2')) +
+  geom_histogram(binwidth = 10) +
+  theme_tufte() +
+  scale_fill_manual(values = c('#0072B2')) +
+  guides(fill="none") +
+  ggtitle('ZFP36 RPKM (Reads Per Kilobase per Million)', subtitle = 'Standard Deviation') +
+  geom_vline(xintercept = (avg - stdev), color = '#D55E00') +
+  geom_vline(xintercept = avg, color = '#D55E00') +
+  geom_vline(xintercept = (avg + stdev), color = '#D55E00')
+```
+
+```{r}
+chopped <- chop_mean_sd(df$RPKM, sds = 1)
+  
+q <- data.frame(df[, 1], df[, 2], paste0(names(df)[2], '_', chopped), df[, 3])
+names(q) <- c('Patient_ID', 'RPKM', 'Tranche', 'EndPt')
+
+head(sample(q))
+```
+:::
