@@ -1,0 +1,360 @@
+---
+title: "Frequent Itemset Mining: Biomarkers"
+subtitle: "Discretization: Thirds"
+author:
+  - name: Paul J Kowalczyk
+    affiliations:
+      - name: HAcKErS LaB
+format:
+  html:
+    toc: true
+    embed-resources: true
+    theme: sandstone
+    code-fold: true
+    code-summary: "Code"
+title-block-banner: true
+date: "`r Sys.Date()`"
+date-format: short
+---
+
+## Prepare computational ecosystem
+
+```{r}
+#| warning: false
+#| message: false
+#| code-fold: true
+#| code-summary: "Code"
+
+library(dplyr)
+library(magrittr)
+library(santoku)
+library(arules)
+library(arulesViz)
+library(tidyverse)
+library(rCBA)
+library(rJava)
+library(RColorBrewer)
+library(DT)
+library(gt)
+
+set.seed(42)
+```
+
+1.  Load libraries
+
+2.  Set seed (for reproducibility)
+
+## Data
+
+Data is taken from "**Classification models for clear cell renal carcinoma stage progression, based on tumor RNAseq expression trained supervised machine learning algorithms**" Z. Jagga & D. Gupta, *BMC Proc.* 2014 Oct 13; 8 (Suppl 6):s2 doi:10.1186/1753-6561-8-s6-s2. These data were downloaded from the journal's website and accessed locally.
+
+-   475 patients
+
+-   Outcome:
+
+    -   274 Early_Stage (clinical tumor Stage I & Stage II)
+
+    -   201 Late_Stage (clinical tumor Stage III & Stage IV)
+
+-   20,532 genes
+
+-   Data reported as RPKM (**R**eads **P**er **K**ilobase per **M**illion)
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+TRAIN <- read.csv("Data/ccRCC_train.csv")
+names(TRAIN)[names(TRAIN) == "Cinical_Status"] <- "Clinical_Status"
+TEST <- read.csv("Data/ccRCC_test.csv")
+names(TEST)[names(TEST) == "Cinical_Status"] <- "Clinical_Status"
+
+alles <- rbind(TEST, TRAIN)
+
+alles[sample(nrow(alles), 5), c(1:3, (ncol(alles)-2):ncol(alles))]
+```
+
+## Feature Engineering
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+# Variance
+qaz <- sapply(alles[ , 2:(ncol(alles)-1)], var) %>% data.frame()
+names(qaz) <- c('variance')
+# Create a new column with row names
+qaz$genes <- rownames(qaz)
+# Remove the original row names (optional, but good practice)
+rownames(qaz) <- NULL
+
+qaz[sample(nrow(qaz), 5), ]
+```
+
+Keep the top *N* genes with the greatest variance reported across all patients (here, *N* = 500).
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+qaz_select <- top_n(qaz, 500, variance)
+
+selected_genes <- qaz_select$genes
+
+salient_genes <- alles[ , names(alles) %in% selected_genes]
+
+z <- cbind(alles$Patient_id, salient_genes, alles$Clinical_Status) %>%
+  rename(Patient_id = 'alles$Patient_id') %>%
+  rename(Clinical_Status = 'alles$Clinical_Status')
+
+z[sample(nrow(z), 5), c(1:3, (ncol(z)-2):ncol(z))]
+```
+
+## Discretization
+
+R::santoku
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+df <- data.frame(
+  Patient_ID = character(),
+  RPKM = numeric(),
+  Tranche = character(),
+  EndPt = character(),
+  stringsAsFactors = FALSE
+)
+
+for (j in 2:(ncol(z) - 1))
+{
+  
+# {
+#   if (j %% 100 == 0) {
+#     print(j)
+#   }
+  
+  TMP <- z[, c(1, j, ncol(z))] %>%
+    filter(z[, j] != 0.0)
+  
+  chopped <- chop_quantiles(TMP[, 2], c(0.33, 0.67), labels = c(
+    paste0(names(TMP)[2], '_', 'Low'),
+    paste0(names(TMP)[2], '_', 'Medium'),
+    paste0(names(TMP)[2], '_', 'High')
+  ))
+  
+  q <- data.frame(TMP[, 1], TMP[, 2], chopped, TMP[, 3])
+  names(q) <- c('Patient_ID', 'RPKM', 'Tranche', 'EndPt')
+  q <- q %>%
+    filter(!str_detect(Tranche, 'Medium')) %>%
+    filter(!str_detect(Tranche, 'Low'))
+  
+  df <- rbind(df, q)
+}
+
+df[sample(nrow(df), 5), ]
+```
+
+## Frequent Itemset Mining
+
+Build transaction pairs
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+endpt <- z[ , c('Patient_id', 'Clinical_Status')] %>%
+  rename(TID = 'Patient_id') %>%
+  rename(item = 'Clinical_Status')
+
+genes <- df[ , c('Patient_ID', 'Tranche')] %>%
+  rename(TID = 'Patient_ID') %>%
+  rename(item = 'Tranche')
+
+transactionPairs <- rbind(endpt, genes)
+
+transactionPairs[sample(nrow(transactionPairs), 5), ]
+```
+
+Instantiate transactions
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+tr <- transactions(
+  transactionPairs,
+  itemLabels = NULL,
+  transactionInfo = NULL,
+  format = "long",
+  cols = c("TID", "item")
+)
+
+summary(tr)
+```
+
+Association Rules
+
+::: panel-tabset
+## Early Stage
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+RHS.association.rules <-
+  apriori(
+    tr,
+    parameter = list(
+      supp = 0.09,
+      conf = 0.9,
+      maxlen = 4,
+      maxtime = 0
+    )
+    , appearance = list(default = "lhs", rhs = "Early_Stage")
+  )
+
+rules <- sort(RHS.association.rules, by = "confidence")
+quality(rules)$improvement <- interestMeasure(rules, measure = "importance")
+
+non_redundant_rules <- rules[!is.redundant(rules)]
+
+maximal_rules <- rules[is.maximal(non_redundant_rules)]
+
+arules::write(maximal_rules, 'maximal_rules.csv', sep = ',')
+```
+
+Plot rules
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+plot(maximal_rules, method = "graph", engine = "html")
+```
+
+Inspect rules
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+rulesTable <- read.csv('maximal_rules.csv')
+
+rulesTable |>
+  gt() |>
+  fmt_number(
+    decimals = 2
+  ) |>
+  tab_options(
+    table.font.size = '12px'
+  )
+```
+
+## Late Stage
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+RHS.association.rules <-
+  apriori(
+    tr,
+    parameter = list(
+      supp = 0.09,
+      conf = 0.9,
+      maxlen = 4,
+      maxtime = 0
+    )
+    , appearance = list(default = "lhs", rhs = "Late_Stage")
+  )
+
+rules <- sort(RHS.association.rules, by = "confidence")
+quality(rules)$improvement <- interestMeasure(rules, measure = "importance")
+
+non_redundant_rules <- rules[!is.redundant(rules)]
+
+Late_Stage_maximal_rules <- rules[is.maximal(non_redundant_rules)]
+
+arules::write(Late_Stage_maximal_rules, 'Late_Stage_maximal_rules.csv', sep = ',')
+```
+
+Plot rules
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+plot(Late_Stage_maximal_rules, method = "graph", engine = "html")
+```
+
+PAEP
+
+:   involved in endometrial development and other biological processes; implicated in tumor growth, particularly in melanoma, and is considered a potential therapeutic target
+
+APOL1
+
+:   encodes a protein, Apolipoprotein L1 (ApoL1), which plays a role in the immune system and is associated with kidney disease, particularly in individuals of African descent
+
+COL6A2
+
+:   provides instructions for making the alpha-2(VI) chain of type VI collagen, a protein found in the extracellular matrix surrounding cells; mutations in the COL6A2 gene can lead to a range of myopathies, including Bethlem myopathy and Ullrich congenital muscular dystrophy
+
+S100A11
+
+:   encodes a protein that is a member of the S100 family of calcium-binding proteins; it plays a role in tumor metastasis, and altered expression of S100A11 has been linked to cancer progression
+
+Inspect rules
+
+```{r}
+#| warning: false
+#| message: false
+#| cache: true
+#| code-fold: true
+#| code-summary: "Code"
+
+rulesTable <- read.csv('Late_Stage_maximal_rules.csv')
+
+rulesTable |>
+  gt() |>
+  fmt_number(
+    decimals = 2
+  ) |>
+  tab_options(
+    table.font.size = '12px'
+  )
+```
+:::
